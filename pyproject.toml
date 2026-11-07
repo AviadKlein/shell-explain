@@ -1,0 +1,27 @@
+[project]
+name = "shell-explain"
+version = "0.1.0"
+description = "she: explain shell commands in plain English"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "tree-sitter>=0.23",
+    "tree-sitter-bash>=0.23",
+]
+
+[project.scripts]
+she = "she.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/she"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

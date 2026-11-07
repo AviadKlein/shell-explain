@@ -1,0 +1,14 @@
+{
+  "name": "shell-explain",
+  "owner": {
+    "name": "Aviad Klein"
+  },
+  "plugins": [
+    {
+      "name": "she-mod",
+      "source": "./she-mod",
+      "description": "Shows she's explanation of Bash commands that are about to ask for permission (advisory only)"
+    }
+  ],
+  "description": "Local marketplace for the she (shell-explain) Claude Code mod"
+}

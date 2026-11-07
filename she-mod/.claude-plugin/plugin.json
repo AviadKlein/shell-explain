@@ -1,0 +1,9 @@
+{
+  "name": "she-mod",
+  "version": "0.1.0",
+  "description": "Shows she's explanation of Bash commands that are about to ask for permission (advisory only)",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Aviad Klein"
+  }
+}
