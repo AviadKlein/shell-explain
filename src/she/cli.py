@@ -122,6 +122,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error(f"--timeout must be positive, got {args.timeout}")
     if actions and args.command:
         parser.error(f"--{actions[0].replace('_', '-')} does not take a command to explain")
+    from she.llm import server_url
+
+    try:
+        server_url(os.environ)
+    except ValueError as error:
+        parser.error(str(error))
     paths = Paths.from_env()
     try:
         match actions:
@@ -280,7 +286,15 @@ def model_source(args: argparse.Namespace, environ: "os._Environ[str] | dict[str
 
 def run_status(args: argparse.Namespace, paths: Paths, out: TextIO) -> int:
     from she import watchdog
-    from she.llm import LlmError, OllamaClient, OllamaConfig, manifest_path, model_required_message, models_dir
+    from she.llm import (
+        LlmError,
+        OllamaClient,
+        OllamaConfig,
+        manifest_path,
+        model_required_message,
+        models_dir,
+        server_source,
+    )
 
     config = OllamaConfig.from_env(args.model)
     client = OllamaClient(config, paths)
@@ -288,11 +302,14 @@ def run_status(args: argparse.Namespace, paths: Paths, out: TextIO) -> int:
     executable = shutil.which("ollama")
     if version:
         ollama = f"reachable at {config.base_url} (v{version})"
+    elif not config.is_local:
+        ollama = f"not reachable at {config.base_url} (not on this machine; she does not start it)"
     elif executable:
         ollama = f"not running at {config.base_url} ({executable}; `she --warm` starts it)"
     else:
         ollama = f"No Ollama installed: nothing at {config.base_url} and `ollama` is not on PATH"
     out.write(f"ollama:        {ollama}\n")
+    out.write(f"server:        {config.base_url} ({server_source()})\n")
     out.write(f"model:         {config.model} ({model_source(args, os.environ)})\n")
 
     root = models_dir()
@@ -319,7 +336,9 @@ def run_status(args: argparse.Namespace, paths: Paths, out: TextIO) -> int:
             loaded = "unknown"
         out.write(f"installed:     {installed}\nloaded:        {loaded}\n")
         out.write(f"available:     {', '.join(names) if names else '(none)'}\n")
-        if found is not None:
+        if found is not None and not config.is_local:
+            out.write("weights:       on the remote server\n")
+        elif found is not None:
             manifest = manifest_path(root, config.model)
             where = display_path(manifest) if manifest.exists() else f"under {display_path(root)} (manifest not found there; is OLLAMA_MODELS set differently for the server?)"
             out.write(f"weights:       {where}\n")
@@ -330,7 +349,9 @@ def run_status(args: argparse.Namespace, paths: Paths, out: TextIO) -> int:
     out.write(f"answer cache:  {display_path(paths.answers_db)} ({_size(paths.answers_db)})\n")
     out.write(f"machine key:   {display_path(paths.key_file)} ({'present' if paths.key_file.exists() else 'absent'})\n")
     pid = watchdog.read_pid(paths.ollama_pid_file)
-    out.write(f"she-started server pid: {pid if pid is not None else 'none'}\n")
+    served = watchdog.read_server_url(paths.ollama_pid_file)
+    started = "none" if pid is None else f"{pid} ({served})" if served else str(pid)
+    out.write(f"she-started server pid: {started}\n")
     out.write(f"watchdog:      {'installed' if watchdog.plist_path().exists() else 'not installed'}\n")
     return EXIT_OK
 

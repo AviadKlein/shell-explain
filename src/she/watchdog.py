@@ -14,12 +14,20 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Optional, Self
 
+from she.llm import server_url
 from she.paths import Paths, ensure_private_dir
 
 LABEL = "com.she.watchdog"
 START_INTERVAL_SECONDS = 300
 DEFAULT_IDLE_MINUTES = 30.0
-PASSED_THROUGH_ENV = ("SHE_SERVER_IDLE", "SHE_OLLAMA_URL", "SHE_STATE_DIR", "SHE_CACHE_DIR", "SHE_CONFIG_DIR")
+PASSED_THROUGH_ENV = (
+    "SHE_SERVER_IDLE",
+    "SHE_OLLAMA_URL",
+    "SHE_OLLAMA_PORT",
+    "SHE_STATE_DIR",
+    "SHE_CACHE_DIR",
+    "SHE_CONFIG_DIR",
+)
 
 
 def plist_path() -> Path:
@@ -101,10 +109,19 @@ class TickResult:
 
 
 def read_pid(pid_file: Path) -> Optional[int]:
+    """The pid of the server she started (the pid file is `<pid> <url>`, or just `<pid>` from older versions)."""
     if not pid_file.is_file():
         return None
-    text = pid_file.read_text().strip()
-    return int(text) if text.isdigit() else None
+    first = next(iter(pid_file.read_text().split()), "")
+    return int(first) if first.isdigit() else None
+
+
+def read_server_url(pid_file: Path) -> Optional[str]:
+    """The URL the she-started server listens on, or None if the pid file doesn't record one."""
+    if not pid_file.is_file():
+        return None
+    fields = pid_file.read_text().split()
+    return fields[1] if len(fields) > 1 else None
 
 
 def is_she_ollama(pid: int) -> bool:
@@ -138,7 +155,7 @@ def tick(paths: Paths, environ: Mapping[str, str], now: Optional[float] = None) 
         paths.ollama_pid_file.unlink(missing_ok=True)
         paths.watchdog_state_file.unlink(missing_ok=True)
         return TickResult(action="not-running", pid=pid)
-    loaded = loaded_model_count(environ.get("SHE_OLLAMA_URL") or "http://localhost:11434")
+    loaded = loaded_model_count(read_server_url(paths.ollama_pid_file) or server_url(environ))
     if loaded is None:
         return TickResult(action="unreachable", pid=pid)
     if loaded > 0:

@@ -55,6 +55,8 @@ declare module 'claude-code' {
       notice: string | null
       /** Id of the newest explanation the person dismissed from the band. */
       dismissed: string | null
+      /** `she --version`'s line (`she 0.2.0`), read at session start; null until known or if it failed. */
+      cliVersion: string | null
       /** False after `/she off` (or the pane's button): no new explanations this session. */
       isOn: boolean
       /** Per Bash tool_use_id: the line drawn under its transcript row; null draws none. */

@@ -1,8 +1,11 @@
 [project]
 name = "shell-explain"
-version = "0.1.0"
+version = "0.2.0"
 description = "she: explain shell commands in plain English"
 readme = "README.md"
+authors = [
+    { name = "Aviad Klein", email = "aviad.klein@gmail.com" }
+]
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

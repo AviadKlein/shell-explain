@@ -2,16 +2,31 @@
 # Installs a released `she` and, when Claude Code is present, the she-mod.
 # Ollama and the model are the user's to install: this script only checks for them.
 #
-#   curl -fsSL https://raw.githubusercontent.com/AviadKlein/shell-explain/v0.1.0/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/AviadKlein/shell-explain/v0.2.0/install.sh | sh
 #
 # SHE_VERSION picks the release tag (default below); SHE_NO_MOD=1 skips the mod.
 set -eu
 
 REPO="AviadKlein/shell-explain"
-VERSION="${SHE_VERSION:-v0.1.0}"
+VERSION="${SHE_VERSION:-v0.2.0}"
 MODEL="${SHE_MODEL:-qwen3.5:4b}"
 
 say() { printf '%s\n' "$*"; }
+
+# True if Ollama's manifest for the model is on disk. Reads files rather than `ollama list`,
+# which needs a running server, and she's own server (port 11435) is usually not up yet.
+model_installed() {
+  case "$1" in
+    *:*) name="${1%:*}"; tag="${1##*:}" ;;
+    *) name="$1"; tag=latest ;;
+  esac
+  case "$name" in
+    *.*/*) where="$name" ;;
+    */*) where="registry.ollama.ai/$name" ;;
+    *) where="registry.ollama.ai/library/$name" ;;
+  esac
+  [ -f "${OLLAMA_MODELS:-$HOME/.ollama/models}/manifests/$where/$tag" ]
+}
 
 if ! command -v uv >/dev/null 2>&1; then
   say "uv is required: https://docs.astral.sh/uv/getting-started/installation/"
@@ -34,7 +49,7 @@ say "==> checking Ollama and the model"
 if ! command -v ollama >/dev/null 2>&1; then
   say "No Ollama installed. Install Ollama, then:"
   say "  ollama pull $MODEL        # or any model Ollama supports; then export SHE_MODEL=<name>"
-elif ! ollama list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx -e "$MODEL" -e "$MODEL:latest"; then
+elif ! model_installed "$MODEL"; then
   say "Model required: $MODEL is not pulled. Either:"
   say "  ollama pull $MODEL"
   say "  export SHE_MODEL=<a model you have>   # see: ollama list"

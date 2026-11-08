@@ -3,8 +3,26 @@
 
 import type { SheBasis, SheBreakdownItem, SheEnv, SheExplanation, SheFile } from '../types'
 
-/** How many explanations the pane keeps. */
+/** How many explanations the pane keeps unless SHE_PANE_HISTORY says otherwise. */
 export const KEEP = 5
+/** The most SHE_PANE_HISTORY may ask for: each one is a full explanation the pane redraws from. */
+export const MAX_KEEP = 50
+
+/**
+ * The pane's history size from SHE_PANE_HISTORY's raw value: a whole number from 1 to
+ * MAX_KEEP, else KEEP, with a warning when the value was set but unusable.
+ */
+export function historySize(raw: string | undefined): { size: number; warning?: string } {
+  const text = raw?.trim() ?? ''
+  if (text === '') return { size: KEEP }
+  const size = /^\d+$/.test(text) ? Number(text) : NaN
+  if (size >= 1 && size <= MAX_KEEP) return { size }
+
+  return {
+    size: KEEP,
+    warning: `she-mod: SHE_PANE_HISTORY must be a whole number from 1 to ${MAX_KEEP}, got "${text}"; keeping ${KEEP}.`,
+  }
+}
 
 export function started(id: string, command: string): SheExplanation {
   return { id, command, status: 'running', summary: '', hasParse: false, breakdown: [], files: [], env: [], unknowns: [] }
@@ -181,10 +199,10 @@ export function finished(x: SheExplanation, code: number | null, stderr: string)
   return { ...x, exit, status: failed ? 'failed' : 'done', note: failed && first ? first : why }
 }
 
-/** Puts an explanation in the list, newest last, keeping KEEP. */
-export function upsert(list: SheExplanation[], x: SheExplanation): SheExplanation[] {
+/** Puts an explanation in the list, newest last, keeping the newest `keep`. */
+export function upsert(list: SheExplanation[], x: SheExplanation, keep: number = KEEP): SheExplanation[] {
   const at = list.findIndex(one => one.id === x.id)
-  if (at === -1) return [...list, x].slice(-KEEP)
+  if (at === -1) return [...list, x].slice(-keep)
 
   return list.map(one => (one.id === x.id ? x : one))
 }

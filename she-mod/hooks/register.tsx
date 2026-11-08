@@ -5,7 +5,7 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SheExplanation, SheTab } from '../types'
-import { apply, finished, parseEvent, splitLines, started, upsert } from './stream'
+import { apply, finished, historySize, parseEvent, splitLines, started, upsert } from './stream'
 import { breakdownLines, clean, effectStyle, firstSentence, sheTemplate, throttleWait } from './view'
 
 const PANE = 'she'
@@ -15,6 +15,7 @@ const PANE_COLUMNS = 60
 /** Kill a `she` run that has not finished by then (its own default timeout is 30 s). */
 const RUN_LIMIT_MS = 90_000
 const WARM_LIMIT_MS = 120_000
+const VERSION_LIMIT_MS = 10_000
 
 const TABS: ReadonlyArray<{ id: SheTab; label: string; hotkey: string }> = [
   { id: 'summary', label: 'Summary', hotkey: '1' },
@@ -29,6 +30,8 @@ const selected = atom({ plugin: 'she-mod', key: 'selected' } as const, null)
 const tab = atom({ plugin: 'she-mod', key: 'tab' } as const, 'summary')
 const notice = atom({ plugin: 'she-mod', key: 'notice' } as const, null)
 const dismissed = atom({ plugin: 'she-mod', key: 'dismissed' } as const, null)
+/** The installed CLI's version line, shown at the bottom of the pane. */
+const cliVersion = atom({ plugin: 'she-mod', key: 'cliVersion' } as const, null)
 /** Session-wide switch: `/she on|off`, or the pane's button. */
 const isOn = atom({ plugin: 'she-mod', key: 'isOn' } as const, true)
 /** One member per Bash tool_use_id: the line under its transcript row. */
@@ -75,7 +78,9 @@ async function warn($: $, text: string): Promise<void> {
 async function explain($: $, id: string, command: string): Promise<void> {
   let x: SheExplanation = started(id, command)
   const row = memberOf(gist, { requestId: id })
-  const save = () => update($, explanations, list => upsert(list, x))
+  // Read on each explanation, so the size follows the environment; a bad value was warned about at session start.
+  const { size: keep } = historySize(await $.env.get('SHE_PANE_HISTORY').catch(() => undefined))
+  const save = () => update($, explanations, list => upsert(list, x, keep))
   const end = async () => {
     await save()
     await update($, row, () => gistOf(x))
@@ -178,6 +183,19 @@ export const register: Register = on => {
       })
       .catch(() => undefined)
 
+    const history = historySize(await $.env.get('SHE_PANE_HISTORY').catch(() => undefined))
+    if (history.warning !== undefined) void warn($, history.warning).catch(() => undefined)
+
+    // The pane's footer; a missing `she` is warned about by the warm-up below, so stay quiet here.
+    void $.process
+      .run(['she', '--version'], { timeoutMs: VERSION_LIMIT_MS })
+      .then(run => {
+        const line = run.stdout.trim().split('\n')[0] ?? ''
+
+        return run.exitCode === 0 && line !== '' ? update($, cliVersion, () => line) : undefined
+      })
+      .catch(() => undefined)
+
     // Warm the model without holding session start; failures are only noted.
     void $.process
       .run(['she', '--warm'], { timeoutMs: WARM_LIMIT_MS })
@@ -235,6 +253,12 @@ export const register: Register = on => {
     const current = await read($, tab)
     const warning = await read($, notice)
     const isEnabled = await read($, isOn)
+    const version = await read($, cliVersion)
+    const footer = version !== null && (
+      <Box key="version" marginTop={1}>
+        <Text dimColor>{clean(version)}</Text>
+      </Box>
+    )
     const width = Math.max(20, e.props.bodyColumns)
     const toggle = (
       <Box key="switch">
@@ -260,6 +284,7 @@ export const register: Register = on => {
           {toggle}
           {warning !== null && <Text color="warning">{warning}</Text>}
           <Text dimColor>No Bash command has needed approval yet.</Text>
+          {footer}
         </Box>
       )
     }
@@ -396,6 +421,7 @@ export const register: Register = on => {
         <Box marginTop={1} flexDirection="column">
           {body}
         </Box>
+        {footer}
       </Box>
     )
   })

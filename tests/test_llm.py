@@ -18,6 +18,8 @@ from she.llm import (
     manifest_path,
     models_dir,
     parse_effect_lines,
+    server_source,
+    server_url,
     without_visible,
 )
 from she.models import EnvEffect, FileEffect, LlmAnswer
@@ -133,7 +135,7 @@ class TestOllamaClient(unittest.TestCase):
         with mock.patch.object(OllamaClient, "is_up", return_value=False), mock.patch(
             "she.llm.shutil.which", return_value=None
         ), mock.patch("she.llm.subprocess.Popen") as popen:
-            with self.assertRaisesRegex(OllamaMissingError, r"^No Ollama installed: nothing answers at http://localhost:11434"):
+            with self.assertRaisesRegex(OllamaMissingError, r"^No Ollama installed: nothing answers at http://127\.0\.0\.1:11435"):
                 self.client.ensure_running()
         popen.assert_not_called()
 
@@ -164,7 +166,7 @@ class TestOllamaClient(unittest.TestCase):
 
         with mock.patch("she.llm.urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
             self.assertFalse(self.client.is_up())
-            with self.assertRaisesRegex(LlmError, r"^cannot reach Ollama at http://localhost:11434"):
+            with self.assertRaisesRegex(LlmError, r"^cannot reach Ollama at http://127\.0\.0\.1:11435"):
                 self.client.model_digest()
 
     def test_ensure_running_starts_server_and_writes_pid(self) -> None:
@@ -176,7 +178,30 @@ class TestOllamaClient(unittest.TestCase):
             self.assertTrue(self.client.ensure_running())
         self.assertEqual(popen.call_args.args[0], ["/opt/homebrew/bin/ollama", "serve"])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        self.assertEqual(self.paths.ollama_pid_file.read_text(), "4242\n")
+        self.assertEqual(popen.call_args.kwargs["env"]["OLLAMA_HOST"], "127.0.0.1:11435")
+        self.assertEqual(self.paths.ollama_pid_file.read_text(), "4242 http://127.0.0.1:11435\n")
+
+    def test_ensure_running_starts_server_on_configured_port(self) -> None:
+        client = OllamaClient(OllamaConfig.from_env(None, {"SHE_OLLAMA_URL": "http://localhost:12000"}), self.paths)
+        process = mock.Mock(pid=7)
+        process.poll.return_value = None
+        with mock.patch.object(OllamaClient, "is_up", side_effect=[False, True]), mock.patch(
+            "she.llm.shutil.which", return_value="/opt/homebrew/bin/ollama"
+        ), mock.patch("she.llm.subprocess.Popen", return_value=process) as popen:
+            self.assertTrue(client.ensure_running())
+        self.assertEqual(popen.call_args.kwargs["env"]["OLLAMA_HOST"], "localhost:12000")
+
+    def test_remote_server_down_is_not_started(self) -> None:
+        client = OllamaClient(OllamaConfig.from_env(None, {"SHE_OLLAMA_URL": "http://gpu-box:11434"}), self.paths)
+        with mock.patch.object(OllamaClient, "is_up", return_value=False), mock.patch("she.llm.subprocess.Popen") as popen:
+            with self.assertRaises(LlmError) as context:
+                client.ensure_running()
+        self.assertEqual(
+            str(context.exception),
+            "cannot reach Ollama at http://gpu-box:11434: it is not on this machine, so she does not start it. "
+            "Start it there, or unset SHE_OLLAMA_URL to use she's own local server.",
+        )
+        popen.assert_not_called()
 
     def test_ensure_running_is_noop_when_up(self) -> None:
         with mock.patch.object(OllamaClient, "is_up", return_value=True), mock.patch("she.llm.subprocess.Popen") as popen:
@@ -187,6 +212,49 @@ class TestOllamaClient(unittest.TestCase):
         config = OllamaConfig.from_env(None, {"SHE_MODEL": "m:1", "SHE_KEEP_ALIVE": "5m", "SHE_OLLAMA_URL": "http://h:1/"})
         self.assertEqual((config.model, config.keep_alive, config.base_url), ("m:1", "5m", "http://h:1"))
         self.assertEqual(OllamaConfig.from_env("cli:2", {"SHE_MODEL": "m:1"}).model, "cli:2")
+
+
+class TestServerUrl(unittest.TestCase):
+    def test_default_is_shes_own_port(self) -> None:
+        self.assertEqual(server_url({}), "http://127.0.0.1:11435")
+
+    def test_port_builds_local_url(self) -> None:
+        self.assertEqual(server_url({"SHE_OLLAMA_PORT": "12000"}), "http://127.0.0.1:12000")
+
+    def test_url_wins_over_port(self) -> None:
+        self.assertEqual(server_url({"SHE_OLLAMA_URL": "http://gpu-box:11434/", "SHE_OLLAMA_PORT": "12000"}), "http://gpu-box:11434")
+
+    def test_port_out_of_range_raises(self) -> None:
+        with self.assertRaises(ValueError) as context:
+            server_url({"SHE_OLLAMA_PORT": "70000"})
+        self.assertEqual(str(context.exception), "expected a port 1-65535 in $SHE_OLLAMA_PORT, got raw_port='70000'")
+
+    def test_port_not_a_number_raises(self) -> None:
+        with self.assertRaises(ValueError) as context:
+            server_url({"SHE_OLLAMA_PORT": "abc"})
+        self.assertEqual(str(context.exception), "expected a port 1-65535 in $SHE_OLLAMA_PORT, got raw_port='abc'")
+
+    def test_url_without_scheme_raises(self) -> None:
+        with self.assertRaises(ValueError) as context:
+            server_url({"SHE_OLLAMA_URL": "gpu-box:11434"})
+        self.assertEqual(
+            str(context.exception), "expected an http(s) URL with a host in $SHE_OLLAMA_URL, got raw_url='gpu-box:11434'"
+        )
+
+    def test_url_with_bad_port_raises(self) -> None:
+        with self.assertRaises(ValueError) as context:
+            server_url({"SHE_OLLAMA_URL": "http://gpu-box:99999"})
+        self.assertEqual(str(context.exception), "expected a valid port in $SHE_OLLAMA_URL, got raw_url='http://gpu-box:99999'")
+
+    def test_source_says_which_setting_won(self) -> None:
+        self.assertEqual(server_source({"SHE_OLLAMA_URL": "http://h:1", "SHE_OLLAMA_PORT": "2"}), "$SHE_OLLAMA_URL; $SHE_OLLAMA_PORT ignored")
+        self.assertEqual(server_source({"SHE_OLLAMA_PORT": "2"}), "$SHE_OLLAMA_PORT")
+
+    def test_local_and_listen_address(self) -> None:
+        local = OllamaConfig.from_env(None, {"SHE_OLLAMA_URL": "http://[::1]:9000"})
+        self.assertTrue(local.is_local)
+        self.assertEqual(local.listen_address, "[::1]:9000")
+        self.assertFalse(OllamaConfig.from_env(None, {"SHE_OLLAMA_URL": "https://ollama.example.com"}).is_local)
 
 
 class TestPrompt(unittest.TestCase):

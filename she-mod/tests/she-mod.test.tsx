@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { SheBreakdownItem } from '../types'
 import { breakdownLines, effectStyle, firstSentence, sheTemplate, throttleWait } from '../hooks/view'
-import { apply, started } from '../hooks/stream'
+import { apply, historySize, started } from '../hooks/stream'
 
 const PANE = {
   plugin: 'she-mod',
@@ -547,4 +547,53 @@ test('the pane button flips the switch; a bad argument says what is accepted', a
   expect(spawned.length).toBe(0)
 
   expect((await $.command.run({ command: 'she', args: 'maybe' })).text).toMatch(/use \/she, \/she on or \/she off/)
+})
+
+test('SHE_PANE_HISTORY: a whole number from 1 to 50, else 5 with a warning', () => {
+  expect(historySize(undefined)).toEqual({ size: 5 })
+  expect(historySize('  ')).toEqual({ size: 5 })
+  expect(historySize('12')).toEqual({ size: 12 })
+  expect(historySize('50')).toEqual({ size: 50 })
+  for (const bad of ['0', '51', '-3', '2.5', 'ten']) {
+    expect(historySize(bad)).toEqual({
+      size: 5,
+      warning: `she-mod: SHE_PANE_HISTORY must be a whole number from 1 to 50, got "${bad}"; keeping 5.`,
+    })
+  }
+})
+
+test('SHE_PANE_HISTORY=2 keeps the two newest explanations', async ($, on) => {
+  mock.env(on, { SHE_PANE_HISTORY: '2' })
+  const { spawned } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+
+  for (const n of [1, 2, 3]) await $.tool.call({ tool: 'Bash', command: `${COMMAND} # ${n}` })
+
+  const text = await paneText($, /2\/2 · done/)
+  expect(spawned.length).toBe(3)
+  expect(text).toMatch(/2\/2 · done/)
+  expect(text).toMatch(/# 3/)
+})
+
+test('a bad SHE_PANE_HISTORY is said once at session start', async ($, on) => {
+  mock.env(on, { SHE_PANE_HISTORY: 'lots' })
+  const { toasts } = engine(on, 'ask')
+  await $.session.start({ cwd: '/tmp' } as never)
+
+  expect(toasts).toEqual(['she-mod: SHE_PANE_HISTORY must be a whole number from 1 to 50, got "lots"; keeping 5.'])
+})
+
+test('the pane ends with the installed she version', async ($, on) => {
+  const { spawned } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+  on('process.run', (_, e) =>
+    e.argv[1] === '--version'
+      ? { value: { exitCode: 0, stdout: 'she 0.2.0\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      : { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } },
+  )
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  expect(await paneText($, /she 0\.2\.0/)).toMatch(/No Bash command[\s\S]*she 0\.2\.0$/)
+  await $.tool.call({ tool: 'Bash', command: COMMAND })
+  expect(await paneText($, /Deletes every file[\s\S]*she 0\.2\.0/)).toMatch(/she 0\.2\.0/)
 })

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,7 +19,10 @@ from she.models import ENV_OPS, FILE_OPS, EnvEffect, FileEffect, LlmAnswer
 from she.paths import Paths, ensure_private_dir
 
 DEFAULT_MODEL = "qwen3.5:4b"
-DEFAULT_URL = "http://localhost:11434"
+DEFAULT_PORT = 11435
+"""she's own server, off Ollama's usual 11434 so other Ollama clients don't share it."""
+DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_PORT}"
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 DEFAULT_KEEP_ALIVE = "10m"
 DEFAULT_NUM_PREDICT = 160
 SERVER_START_SECONDS = 15.0
@@ -56,6 +60,49 @@ def model_required_message(model: str, installed: List[str], is_default: bool = 
     )
 
 
+def server_url(environ: Optional[Mapping[str, str]] = None) -> str:
+    """The Ollama URL she uses: `$SHE_OLLAMA_URL`, else `http://127.0.0.1:$SHE_OLLAMA_PORT`, else port 11435.
+
+    `SHE_OLLAMA_URL` wins when both are set, so it can point at a remote server.
+
+    Raises:
+        ValueError: If `SHE_OLLAMA_URL` is not an http(s) URL with a host, or `SHE_OLLAMA_PORT`
+            is not a port number.
+    """
+    env = os.environ if environ is None else environ
+    raw_url = env.get("SHE_OLLAMA_URL")
+    if raw_url:
+        parts = urllib.parse.urlsplit(raw_url.strip())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(f"expected an http(s) URL with a host in $SHE_OLLAMA_URL, got {raw_url=}")
+        try:
+            parts.port
+        except ValueError as error:
+            raise ValueError(f"expected a valid port in $SHE_OLLAMA_URL, got {raw_url=}") from error
+        return raw_url.strip().rstrip("/")
+    raw_port = env.get("SHE_OLLAMA_PORT")
+    if not raw_port:
+        return DEFAULT_URL
+    port = int(raw_port) if raw_port.strip().isdigit() else -1
+    if not 1 <= port <= 65535:
+        raise ValueError(f"expected a port 1-65535 in $SHE_OLLAMA_PORT, got {raw_port=}")
+    return f"http://127.0.0.1:{port}"
+
+
+def server_source(environ: Optional[Mapping[str, str]] = None) -> str:
+    """Which setting chose the server URL, for `she --status`."""
+    env = os.environ if environ is None else environ
+    match (bool(env.get("SHE_OLLAMA_URL")), bool(env.get("SHE_OLLAMA_PORT"))):
+        case (True, True):
+            return "$SHE_OLLAMA_URL; $SHE_OLLAMA_PORT ignored"
+        case (True, False):
+            return "$SHE_OLLAMA_URL"
+        case (False, True):
+            return "$SHE_OLLAMA_PORT"
+        case _:
+            return f"default port {DEFAULT_PORT}; set SHE_OLLAMA_PORT or SHE_OLLAMA_URL to change"
+
+
 def models_dir(environ: Optional[Mapping[str, str]] = None) -> Path:
     """Where Ollama keeps model files: `$OLLAMA_MODELS`, else `~/.ollama/models` (Ollama's own default)."""
     env = os.environ if environ is None else environ
@@ -83,7 +130,7 @@ class OllamaConfig:
     """Connection and generation settings.
 
     Attributes:
-        base_url: Ollama server URL (`SHE_OLLAMA_URL`).
+        base_url: Ollama server URL (`SHE_OLLAMA_URL`, else `SHE_OLLAMA_PORT` on 127.0.0.1).
         model: Model tag (`--model` > `SHE_MODEL` > default).
         keep_alive: How long Ollama keeps the model loaded (`SHE_KEEP_ALIVE`).
         num_predict: Output token cap.
@@ -100,11 +147,24 @@ class OllamaConfig:
     def from_env(cls, model: Optional[str] = None, environ: Optional[Mapping[str, str]] = None) -> Self:
         env = os.environ if environ is None else environ
         return cls(
-            base_url=(env.get("SHE_OLLAMA_URL") or DEFAULT_URL).rstrip("/"),
+            base_url=server_url(env),
             model=model or env.get("SHE_MODEL") or DEFAULT_MODEL,
             keep_alive=env.get("SHE_KEEP_ALIVE") or DEFAULT_KEEP_ALIVE,
             is_default_model=not (model or env.get("SHE_MODEL")),
         )
+
+    @property
+    def is_local(self) -> bool:
+        """True when the server is on this machine, so she may start it."""
+        return urllib.parse.urlsplit(self.base_url).hostname in LOCAL_HOSTS
+
+    @property
+    def listen_address(self) -> str:
+        """`host:port` for `OLLAMA_HOST` when she starts `ollama serve` for this URL."""
+        parts = urllib.parse.urlsplit(self.base_url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        host = f"[{parts.hostname}]" if parts.hostname and ":" in parts.hostname else parts.hostname
+        return f"{host}:{port}"
 
     def copy(self, **changes: object) -> Self:
         return replace(self, **changes)
@@ -167,13 +227,25 @@ class OllamaClient:
     # -- lifecycle ------------------------------------------------------------------------
 
     def ensure_running(self, deadline: Optional[float] = None) -> bool:
-        """Start `ollama serve` detached if the server is down. Returns True if it was started here.
+        """Start `ollama serve` detached on the configured port if the server is down.
+
+        Only a local server is started (`OLLAMA_HOST` set to the configured host and port); a remote
+        one is the user's to run. The pid file records the pid and the URL it serves.
+
+        Returns:
+            True if the server was started here.
 
         Raises:
-            LlmError: If ollama isn't installed or doesn't come up within 15 s (or the deadline).
+            LlmError: If the server is remote and down, ollama isn't installed, or it doesn't come up
+                within 15 s (or the deadline).
         """
         if self.is_up():
             return False
+        if not self.__config.is_local:
+            raise LlmError(
+                f"cannot reach Ollama at {self.__config.base_url}: it is not on this machine, so she does not "
+                "start it. Start it there, or unset SHE_OLLAMA_URL to use she's own local server."
+            )
         executable = shutil.which("ollama")
         if executable is None:
             raise OllamaMissingError(
@@ -186,9 +258,10 @@ class OllamaClient:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env={**os.environ, "OLLAMA_HOST": self.__config.listen_address},
         )
         ensure_private_dir(self.__paths.state_dir)
-        self.__paths.ollama_pid_file.write_text(f"{process.pid}\n")
+        self.__paths.ollama_pid_file.write_text(f"{process.pid} {self.__config.base_url}\n")
         started = time.monotonic()
         while time.monotonic() - started < SERVER_START_SECONDS:
             _remaining(deadline, POLL_INTERVAL_SECONDS)

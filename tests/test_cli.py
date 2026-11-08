@@ -48,7 +48,8 @@ class CliTestCase(unittest.TestCase):
             },
         )
         self.environment.start()
-        os.environ.pop("SHE_INSTRUCTIONS", None)
+        for name in ("SHE_INSTRUCTIONS", "SHE_OLLAMA_URL", "SHE_OLLAMA_PORT"):
+            os.environ.pop(name, None)
 
     def tearDown(self) -> None:
         self.environment.stop()
@@ -90,6 +91,12 @@ class TestArguments(CliTestCase):
         code, _, err = self.run_cli(["--status", "--warm"])
         self.assertEqual(code, 2)
         self.assertIn("choose one action at a time", err)
+
+    def test_bad_ollama_port_is_usage_error(self) -> None:
+        with mock.patch.dict(os.environ, {"SHE_OLLAMA_PORT": "0"}):
+            code, _, err = self.run_cli(["--status"])
+        self.assertEqual(code, 2)
+        self.assertIn("expected a port 1-65535 in $SHE_OLLAMA_PORT, got raw_port='0'", err)
 
     def test_selected_sections(self) -> None:
         namespace = argparse.Namespace(list=True, list_env=False)
@@ -208,7 +215,19 @@ class TestStatus(CliTestCase):
         self.assertNotIn("weights:", out)
 
     def test_ollama_installed_but_down(self) -> None:
-        self.assertIn("not running at http://localhost:11434 (/usr/local/bin/ollama", self.status(None, []))
+        out = self.status(None, [])
+        self.assertIn("not running at http://127.0.0.1:11435 (/usr/local/bin/ollama", out)
+        self.assertIn("server:        http://127.0.0.1:11435 (default port 11435;", out)
+
+    def test_remote_server_down(self) -> None:
+        with mock.patch.dict(os.environ, {"SHE_OLLAMA_URL": "http://gpu-box:11434"}):
+            out = self.status(None, [])
+        self.assertIn("not reachable at http://gpu-box:11434 (not on this machine; she does not start it)", out)
+
+    def test_remote_weights_are_not_looked_up_locally(self) -> None:
+        with mock.patch.dict(os.environ, {"SHE_OLLAMA_URL": "http://gpu-box:11434"}):
+            out = self.status("0.40.0", [{"name": "qwen3.5:4b", "digest": "abc", "size": 10}])
+        self.assertIn("weights:       on the remote server", out)
 
     def test_model_required(self) -> None:
         with mock.patch.dict(os.environ, {"SHE_MODEL": "gemma3:4b"}):

@@ -307,14 +307,18 @@ the version probe.
 
 ## 6. Ollama lifecycle
 
-- `she` talks to `http://localhost:11434` (override `SHE_OLLAMA_URL`).
-- On any LLM call (and on `--warm`): probe `GET /api/version`. If it's down, start
-  `ollama serve` detached. This is idempotent: a second start is skipped because the
-  probe succeeds.
+- `she` talks to its own server at `http://127.0.0.1:11435`. `SHE_OLLAMA_PORT` changes the
+  port; `SHE_OLLAMA_URL` sets a full URL (local or remote) and wins when both are set. An
+  invalid value is a usage error (exit 2).
+- On any LLM call (and on `--warm`): probe `GET /api/version`. If it's down and the URL's
+  host is local (`localhost`, `127.0.0.1`, `::1`), start `ollama serve` detached with
+  `OLLAMA_HOST=<host>:<port>`, and record `<pid> <url>` in the PID file. This is
+  idempotent: a second start is skipped because the probe succeeds. A remote server is
+  never started: a remote URL that doesn't answer → exit 4.
 - Requests send `keep_alive` (default `10m`, override `SHE_KEEP_ALIVE`), so Ollama unloads
   the model on its own after idle time.
 - **Watchdog:** a launchd user agent (`~/Library/LaunchAgents/`, `StartInterval` 300 s)
-  checks `/api/ps`. If no model has been loaded for 30 minutes (`SHE_SERVER_IDLE`), it
+  checks `/api/ps` on the URL recorded in the PID file. If no model has been loaded for 30 minutes (`SHE_SERVER_IDLE`), it
   stops the server. It only stops a server that `she` started (tracked by a PID file in
   `~/Library/Application Support/she/`, and checked with `ps` to still be an ollama process), so
   an Ollama you run yourself for other work is left alone. Installed with

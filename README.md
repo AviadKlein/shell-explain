@@ -39,13 +39,13 @@ One line installs a released `she` and, if Claude Code is installed, the mod. It
 reports whether Ollama and your model are ready:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AviadKlein/shell-explain/v0.1.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/AviadKlein/shell-explain/v0.2.0/install.sh | sh
 ```
 
 Or the same by hand:
 
 ```sh
-uv tool install "git+https://github.com/AviadKlein/shell-explain@v0.1.0"
+uv tool install "git+https://github.com/AviadKlein/shell-explain@v0.2.0"
 claude plugin install she-mod --marketplace AviadKlein/shell-explain
 ```
 
@@ -58,9 +58,20 @@ In the mod's pane, the `⧉` buttons copy a file's full path, an env variable (`
 or the command wrapped as `she -- '<command>'`, so pasting it explains the command
 instead of running it.
 
+The pane keeps the last 5 explanations (`‹ older` / `newer ›`); set `SHE_PANE_HISTORY`
+(1 to 50) in the environment Claude Code starts in to keep more or fewer.
+
 `/she` opens the pane; `/she off` stops new explanations for the rest of the session and
 `/she on` resumes them (the pane has the same switch). To turn the mod off for good:
 `claude plugin disable she-mod`.
+
+`she` runs its own Ollama server on port 11435 (`SHE_OLLAMA_PORT`), separate from an
+Ollama you use on the usual 11434, so other clients can't change its `keep_alive`, context
+length or loaded model. Both servers read the same downloaded models. To use an Ollama
+on another machine instead, set `SHE_OLLAMA_URL`. The command you're explaining is sent
+there unredacted, and Ollama has no authentication, so use an SSH tunnel or a private
+network rather than an open port. The mod's `she` reads these variables from the
+environment Claude Code was started in.
 
 ### 3. Check
 
@@ -73,18 +84,38 @@ otherwise where the model's weights are and how to remove them.
 
 ### Updating and removing
 
+#### Updating
 ```sh
-uv tool install --force "git+https://github.com/AviadKlein/shell-explain@v0.2.0"   # a newer tag
+uv tool install --force "git+https://github.com/AviadKlein/shell-explain@v0.3.0"   # a newer tag
 claude plugin marketplace update shell-explain                                     # newer mod
+```
+
+#### Removing `she`
+```sh
 uv tool uninstall shell-explain
 claude plugin uninstall she-mod
+```
+
+#### Don't forget to remove the Ollama weights from disk if you don't need it anymore
+```sh
 ollama rm qwen3.5:4b              # frees the model's disk space
 ```
 
-## Usage
+## How the mod works
+
+[![she-mod flow](docs/she-mod-flow.svg)](docs/she-mod-flow.excalidraw)
+
+The diagram traces which Claude Code events the mod hooks (`session.start`, `tool.check`
+for Bash, `command.run`, `ui.render`), the `she` processes it spawns, and the HTTP calls
+`she` makes to the Ollama server. Its source is
+[docs/she-mod-flow.excalidraw](docs/she-mod-flow.excalidraw). To edit it, open the file at
+[excalidraw.com](https://excalidraw.com) (menu → Open), then re-export the SVG next to it.
+
+## CLI Usage
 
 ```sh
 she -- 'find . -name "*.tmp" -delete && export CLEANED=1'
+she -- 'git log --pretty=format:'\''%h %an %ad %s'\'' --date=short | head -5; echo '\''---'\''; find . -path ./.git -prune -o -type f -not -name '\''*.ipynb'\'' -print0 | xargs -0 wc -l 2>/dev/null | sort -rn | head -10; echo '\''---'\''; ls -la | awk '\''NR>1 {sum+=$5} END {print "total bytes:", sum}'\'''
 she --parse-only -- 'tar -czf out.tgz src'      # no LLM, ~100 ms
 she --json -- 'git log --graph --oneline'       # she/v1 JSON
 she --json < commands.sh                        # one JSON list; heredocs stay whole
@@ -110,12 +141,14 @@ Exit codes: 0 ok, 1 internal error, 2 usage error, 3 parse error, 4 LLM unavaila
 | Variable | Default |
 |---|---|
 | `SHE_MODEL` | `qwen3.5:4b`; any model you pulled into Ollama |
-| `SHE_OLLAMA_URL` | `http://localhost:11434` |
+| `SHE_OLLAMA_PORT` | `11435`: the port of she's own local Ollama server, which she starts when it's down |
+| `SHE_OLLAMA_URL` | (unset) a full URL, e.g. a remote `http://gpu-box:11434`; wins over `SHE_OLLAMA_PORT`. she only starts servers on this machine |
 | `OLLAMA_MODELS` | `~/.ollama/models`: Ollama's own setting, where model weights live; `she --status` reads it |
 | `SHE_KEEP_ALIVE` | `10m` |
 | `SHE_INSTRUCTIONS` | (unset) a file path or literal instructions text |
 | `SHE_CACHE_TTL` | `7` (days) |
 | `SHE_CACHE_MAX_MB` | `50` |
+| `SHE_PANE_HISTORY` | `5`: how many explanations the mod's pane keeps (1 to 50) |
 | `SHE_SERVER_IDLE` | `30` (minutes, for the watchdog) |
 | `SHE_CACHE_DIR` / `SHE_STATE_DIR` / `SHE_CONFIG_DIR` | `~/Library/Caches/she`, `~/Library/Application Support/she`, `~/.config/she` |
 

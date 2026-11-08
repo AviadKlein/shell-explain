@@ -44,6 +44,22 @@ class TestTick(unittest.TestCase):
             self.assertEqual(watchdog.tick(self.paths, {}, now=99999.0).action, "busy")
         self.assertFalse(self.paths.watchdog_state_file.exists())
 
+    def test_checks_the_url_recorded_in_the_pid_file(self) -> None:
+        self.paths.ollama_pid_file.write_text("4242 http://127.0.0.1:12000\n")
+        with mock.patch("she.watchdog.is_she_ollama", return_value=True), mock.patch(
+            "she.watchdog.loaded_model_count", return_value=1
+        ) as count:
+            self.assertEqual(watchdog.tick(self.paths, {"SHE_OLLAMA_PORT": "13000"}).action, "busy")
+        count.assert_called_once_with("http://127.0.0.1:12000")
+
+    def test_old_pid_file_falls_back_to_configured_url(self) -> None:
+        self.paths.ollama_pid_file.write_text("4242\n")
+        with mock.patch("she.watchdog.is_she_ollama", return_value=True), mock.patch(
+            "she.watchdog.loaded_model_count", return_value=1
+        ) as count:
+            watchdog.tick(self.paths, {"SHE_OLLAMA_PORT": "13000"})
+        count.assert_called_once_with("http://127.0.0.1:13000")
+
     def test_foreign_process_is_left_alone(self) -> None:
         self.paths.ollama_pid_file.write_text("4242\n")
         with mock.patch("she.watchdog.is_she_ollama", return_value=False), mock.patch("she.watchdog.os.kill") as kill:
