@@ -14,6 +14,9 @@ from she.llm import (
     ModelMissingError,
     OllamaClient,
     OllamaConfig,
+    OllamaMissingError,
+    manifest_path,
+    models_dir,
     parse_effect_lines,
     without_visible,
 )
@@ -108,7 +111,31 @@ class TestOllamaClient(unittest.TestCase):
         with mock.patch("she.llm.urllib.request.urlopen", return_value=respond({"models": []})):
             with self.assertRaises(ModelMissingError) as context:
                 self.client.model_digest()
-        self.assertEqual(str(context.exception), "model 'qwen3.5:4b' is not installed; run: ollama pull qwen3.5:4b")
+        self.assertEqual(
+            str(context.exception),
+            "Model required: 'qwen3.5:4b' is not installed in Ollama (no models installed). "
+            "Pull it with `ollama pull qwen3.5:4b`, or set SHE_MODEL to an installed model.",
+        )
+
+    def test_missing_model_lists_installed_ones(self) -> None:
+        tags = {"models": [{"name": "llama3.2:3b", "digest": "d"}, {"name": "gemma3:4b", "digest": "e"}]}
+        with mock.patch("she.llm.urllib.request.urlopen", return_value=respond(tags)):
+            with self.assertRaisesRegex(ModelMissingError, r"\(installed: llama3\.2:3b, gemma3:4b\)"):
+                self.client.model_digest()
+
+    def test_missing_default_model_says_it_is_the_default(self) -> None:
+        client = OllamaClient(OllamaConfig.from_env(None, {}), self.paths)
+        with mock.patch("she.llm.urllib.request.urlopen", return_value=respond({"models": []})):
+            with self.assertRaisesRegex(ModelMissingError, r"^Model required: 'qwen3\.5:4b' \(the default; no SHE_MODEL set\) is not"):
+                client.model_digest()
+
+    def test_no_ollama_installed(self) -> None:
+        with mock.patch.object(OllamaClient, "is_up", return_value=False), mock.patch(
+            "she.llm.shutil.which", return_value=None
+        ), mock.patch("she.llm.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(OllamaMissingError, r"^No Ollama installed: nothing answers at http://localhost:11434"):
+                self.client.ensure_running()
+        popen.assert_not_called()
 
     def test_chat_stream_request_and_chunks(self) -> None:
         lines = [
@@ -174,3 +201,21 @@ class TestPrompt(unittest.TestCase):
         self.assertEqual([message["role"] for message in messages], ["system", "user"])
         self.assertIn("rm -rf x", messages[1]["content"])
         self.assertIn("Pieces:\n- rm", messages[1]["content"])
+
+
+class TestModelLocation(unittest.TestCase):
+    def test_models_dir(self) -> None:
+        self.assertEqual(models_dir({"OLLAMA_MODELS": "/data/ollama"}), Path("/data/ollama"))
+        self.assertEqual(models_dir({}), Path.home() / ".ollama" / "models")
+
+    def test_manifest_path(self) -> None:
+        root = Path("/m")
+        cases = {
+            "qwen3.5:4b": "/m/manifests/registry.ollama.ai/library/qwen3.5/4b",
+            "gemma3": "/m/manifests/registry.ollama.ai/library/gemma3/latest",
+            "user/tuned:q4": "/m/manifests/registry.ollama.ai/user/tuned/q4",
+            "hf.co/org/repo:Q4_K_M": "/m/manifests/hf.co/org/repo/Q4_K_M",
+        }
+        for model, expected in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(manifest_path(root, model), Path(expected))

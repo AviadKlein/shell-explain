@@ -1,7 +1,7 @@
 {
   "name": "she-mod",
-  "version": "0.1.0",
-  "description": "Shows she's explanation of Bash commands that are about to ask for permission (advisory only)",
+  "version": "0.2.0",
+  "description": "Shows she's explanation of Bash commands at a permission prompt a person sees (not auto-approved or IDE-host asks) (advisory only)",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Aviad Klein"

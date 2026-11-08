@@ -3,7 +3,8 @@ import type { Engine as TestEngine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { SheBreakdownItem } from '../types'
-import { breakdownLines, effectStyle, firstSentence, throttleWait } from '../hooks/view'
+import { breakdownLines, effectStyle, firstSentence, sheTemplate, throttleWait } from '../hooks/view'
+import { apply, started } from '../hooks/stream'
 
 const PANE = {
   plugin: 'she-mod',
@@ -444,4 +445,106 @@ test('she missing: one notice, nothing breaks', async ($, on) => {
   expect(text).toMatch(/not on PATH/)
   expect(toasts.length).toBe(1)
   expect(toasts[0]).toMatch(/not found on PATH/)
+})
+
+test('she starts on the ask itself, not on the permission dialog', async ($, on) => {
+  const { spawned } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+
+  // A dialog alone does nothing: another plugin may answer PermissionRequest
+  // without passing it on, so the mod never depends on seeing it.
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } })
+  expect(spawned.length).toBe(0)
+
+  // An ask starts she once, for that command.
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
+  await paneText($, /Then sets CLEANED/)
+  expect(spawned.map(s => s.argv.at(-1))).toEqual(['rm -rf dist'])
+})
+
+test('a failed LLM step shows she\'s own reason, not a generic note', () => {
+  const reason = "Model required: 'gemma3:4b' is not installed in Ollama (no models installed)."
+  const done = (warnings: unknown) =>
+    apply(started('t1', 'ls'), { event: 'done', summary: null, warnings, exit: 4, timing_ms: {} })
+
+  expect(done([`LLM unavailable: ${reason}`]).note).toBe(reason)
+  expect(done(['something else']).note).toBe('no LLM summary (model unavailable or timed out)')
+  expect(done(undefined).note).toBe('no LLM summary (model unavailable or timed out)')
+})
+
+test('copy buttons: the command inside she -- \'…\', a full file path, NAME=value', async ($, on) => {
+  const { spawned, toasts } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+  const copied: string[] = []
+  on('ui.copy', (_, e) => {
+    copied.push(e.text)
+
+    return { value: { isCopied: true } }
+  })
+  await $.tool.call({ tool: 'Bash', command: COMMAND })
+  await paneText($, /Deletes every file/)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'copy-command' })
+  await ui.press({ key: 'files' })
+  await ui.press({ key: 'copy-file-0' })
+  await ui.press({ key: 'env' })
+  await ui.press({ key: 'copy-env-0' })
+  await ui.unmount()
+
+  expect(copied[0]).toBe(sheTemplate(COMMAND))
+  expect(copied[1]).toBe('./**/*.tmp')
+  expect(copied[2]).toBe('CLEANED=1')
+  expect(toasts.at(-1)).toBe('she: copied CLEANED')
+})
+
+test('the copied command is one quoted word after she --, whatever it holds', () => {
+  expect(sheTemplate('rm -rf dist')).toBe("she -- 'rm -rf dist'")
+  expect(sheTemplate("echo 'hi' && x=$(date)")).toBe("she -- 'echo '\\''hi'\\'' && x=$(date)'")
+  expect(sheTemplate('a\nb')).toBe("she -- 'a\nb'")
+})
+
+test('no copy buttons on the summary, breakdown or unknowns', async ($, on) => {
+  const { spawned } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+  await $.tool.call({ tool: 'Bash', command: COMMAND })
+  await paneText($, /Deletes every file/)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const tab of ['summary', 'breakdown', 'unknowns']) {
+    await ui.press({ key: tab })
+    const buttons = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))
+    expect(buttons.filter(label => label === '⧉').length).toBe(1)
+  }
+  await ui.unmount()
+})
+
+test('/she off stops new explanations for the session; /she on resumes', async ($, on) => {
+  const { spawned } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+
+  const off = await $.command.run({ command: 'she', args: 'OFF' })
+  expect(off.text).toMatch(/off for this session/)
+  const call = await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
+  expect(call.deny).toBeUndefined()
+  expect(spawned.length).toBe(0)
+  expect(await paneText($, /explanations off/)).toMatch(/explanations off \(this session\)/)
+
+  expect((await $.command.run({ command: 'she', args: 'on' })).text).toMatch(/on for this session/)
+  await $.tool.call({ tool: 'Bash', command: COMMAND })
+  await paneText($, /Deletes every file/)
+  expect(spawned.map(s => s.argv.at(-1))).toEqual([COMMAND])
+})
+
+test('the pane button flips the switch; a bad argument says what is accepted', async ($, on) => {
+  const { spawned } = engine(on, 'ask')
+  she(on, spawned, STREAM)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'toggle' })
+  await ui.unmount()
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf dist' })
+  expect(spawned.length).toBe(0)
+
+  expect((await $.command.run({ command: 'she', args: 'maybe' })).text).toMatch(/use \/she, \/she on or \/she off/)
 })

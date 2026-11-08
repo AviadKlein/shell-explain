@@ -131,11 +131,27 @@ export function apply(x: SheExplanation, event: Record<string, unknown>): SheExp
       const whole = summary && typeof summary.text === 'string' ? summary.text : ''
       const exit = typeof event.exit === 'number' ? event.exit : x.exit
 
-      return { ...x, summary: whole !== '' ? whole : x.summary, exit, status: 'done', note: noteFor(exit) ?? x.note }
+      const llm = llmReason(event.warnings)
+      const note = exit === 4 && llm !== undefined ? llm : noteFor(exit)
+
+      return { ...x, summary: whole !== '' ? whole : x.summary, exit, status: 'done', note: note ?? x.note }
     }
     default:
       return x
   }
+}
+
+const LLM_WARNING = 'LLM unavailable: '
+
+/**
+ * Why the LLM step failed, from the `done` event's warnings: `she`'s own words,
+ * such as "Model required: …" or "No Ollama installed: …".
+ */
+export function llmReason(warnings: unknown): string | undefined {
+  if (!Array.isArray(warnings)) return undefined
+  const hit = warnings.find((w): w is string => typeof w === 'string' && w.startsWith(LLM_WARNING))
+
+  return hit?.slice(LLM_WARNING.length)
 }
 
 /** What `she`'s exit code means for the pane (CLI_CONTRACT.md §8). */

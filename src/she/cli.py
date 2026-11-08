@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--json-stream", action="store_true", help="NDJSON events: deterministic, summary chunks, done")
     explain.add_argument("--no-learn", action="store_true", help="never run help/version probes for unknown tools")
     explain.add_argument("--no-cache", action="store_true", help="skip the answer cache (no read, no write)")
-    explain.add_argument("--model", metavar="NAME", help="Ollama model (default: $SHE_MODEL or qwen3.5:4b)")
+    explain.add_argument("--model", metavar="NAME", help="Ollama model to use; she never downloads it (default: $SHE_MODEL, else qwen3.5:4b)")
     explain.add_argument("--instructions", metavar="FILE", type=Path, help="ad-hoc instructions file for this call")
     explain.add_argument(
         "--timeout", metavar="SEC", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="overall deadline (default 30)"
@@ -263,34 +263,68 @@ def run_warm(args: argparse.Namespace, paths: Paths, out: TextIO) -> int:
     return EXIT_OK
 
 
+def _bytes(size: int) -> str:
+    return f"{size / 1024:.0f} KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB" if size < 1024**3 else f"{size / 1024**3:.1f} GB"
+
+
 def _size(path: Path) -> str:
-    if not path.exists():
-        return "absent"
-    size = path.stat().st_size
-    return f"{size / 1024:.0f} KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB"
+    return _bytes(path.stat().st_size) if path.exists() else "absent"
+
+
+def model_source(args: argparse.Namespace, environ: "os._Environ[str] | dict[str, str]") -> str:
+    """Where the model name came from: `--model`, `$SHE_MODEL`, or the built-in default."""
+    if args.model:
+        return "--model"
+    return "$SHE_MODEL" if environ.get("SHE_MODEL") else "default; set SHE_MODEL to choose"
 
 
 def run_status(args: argparse.Namespace, paths: Paths, out: TextIO) -> int:
     from she import watchdog
-    from she.llm import LlmError, OllamaClient, OllamaConfig
+    from she.llm import LlmError, OllamaClient, OllamaConfig, manifest_path, model_required_message, models_dir
 
     config = OllamaConfig.from_env(args.model)
     client = OllamaClient(config, paths)
     version = client.server_version()
-    out.write(f"ollama:        {'reachable at ' + config.base_url + ' (v' + version + ')' if version else 'not reachable at ' + config.base_url}\n")
-    digest_text = "unknown (server not reachable)"
-    loaded = "unknown"
+    executable = shutil.which("ollama")
     if version:
+        ollama = f"reachable at {config.base_url} (v{version})"
+    elif executable:
+        ollama = f"not running at {config.base_url} ({executable}; `she --warm` starts it)"
+    else:
+        ollama = f"No Ollama installed: nothing at {config.base_url} and `ollama` is not on PATH"
+    out.write(f"ollama:        {ollama}\n")
+    out.write(f"model:         {config.model} ({model_source(args, os.environ)})\n")
+
+    root = models_dir()
+    if version:
+        wanted = {config.model, config.model if ":" in config.model else f"{config.model}:latest"}
         try:
-            digest_text = client.model_digest()
+            models = client.installed_models()
         except LlmError as error:
-            digest_text = str(error)
+            models, listing_error = [], str(error)
+        else:
+            listing_error = None
+        names = [str(model.get("name", "")) for model in models]
+        found = next((model for model in models if model.get("name") in wanted or model.get("model") in wanted), None)
+        if listing_error is not None:
+            installed = f"unknown ({listing_error})"
+        elif found is not None:
+            installed = f"yes, {_bytes(int(found.get('size', 0)))}, digest {str(found.get('digest', ''))[:12]}"
+        else:
+            installed = model_required_message(config.model, names, config.is_default_model)
         try:
-            names = [model.get("name", "") for model in client.running_models()]
-            loaded = "yes" if config.model in names or f"{config.model}:latest" in names else "no"
+            running = [model.get("name", "") for model in client.running_models()]
+            loaded = "yes" if wanted & set(running) else "no"
         except LlmError:
             loaded = "unknown"
-    out.write(f"model:         {config.model}\ndigest:        {digest_text}\nloaded:        {loaded}\n")
+        out.write(f"installed:     {installed}\nloaded:        {loaded}\n")
+        out.write(f"available:     {', '.join(names) if names else '(none)'}\n")
+        if found is not None:
+            manifest = manifest_path(root, config.model)
+            where = display_path(manifest) if manifest.exists() else f"under {display_path(root)} (manifest not found there; is OLLAMA_MODELS set differently for the server?)"
+            out.write(f"weights:       {where}\n")
+            out.write(f"               layers in {display_path(root / 'blobs')}; remove with `ollama rm {config.model}`\n")
+    out.write(f"models dir:    {display_path(root)} ({'$OLLAMA_MODELS' if os.environ.get('OLLAMA_MODELS') else 'Ollama default; OLLAMA_MODELS moves it'})\n")
     out.write(f"keep_alive:    {config.keep_alive}\n")
     out.write(f"pages cache:   {display_path(paths.pages_db)} ({_size(paths.pages_db)})\n")
     out.write(f"answer cache:  {display_path(paths.answers_db)} ({_size(paths.answers_db)})\n")

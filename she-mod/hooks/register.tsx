@@ -6,7 +6,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { SheExplanation, SheTab } from '../types'
 import { apply, finished, parseEvent, splitLines, started, upsert } from './stream'
-import { breakdownLines, clean, effectStyle, firstSentence, throttleWait } from './view'
+import { breakdownLines, clean, effectStyle, firstSentence, sheTemplate, throttleWait } from './view'
 
 const PANE = 'she'
 const TITLE = 'she: explain'
@@ -29,6 +29,8 @@ const selected = atom({ plugin: 'she-mod', key: 'selected' } as const, null)
 const tab = atom({ plugin: 'she-mod', key: 'tab' } as const, 'summary')
 const notice = atom({ plugin: 'she-mod', key: 'notice' } as const, null)
 const dismissed = atom({ plugin: 'she-mod', key: 'dismissed' } as const, null)
+/** Session-wide switch: `/she on|off`, or the pane's button. */
+const isOn = atom({ plugin: 'she-mod', key: 'isOn' } as const, true)
 /** One member per Bash tool_use_id: the line under its transcript row. */
 const gist = atom({ plugin: 'she-mod', key: 'gist' } as const, null)
 
@@ -55,6 +57,12 @@ function gistOf(x: SheExplanation): string {
 
 // Module variable on purpose: one toast per module load is enough.
 let hasToasted = false
+
+/** Copies `text` to the clipboard of the surface the press came from, and says so. */
+async function copy($: $, text: string, what: string, surface: Parameters<$['ui']['copy']>[0]['surface']) {
+  const result = await $.ui.copy({ text, surface })
+  $.ui.toast(result.isCopied ? `she: copied ${what}` : `she: could not copy (${result.reason})`)
+}
 
 async function warn($: $, text: string): Promise<void> {
   await update($, notice, () => text)
@@ -162,7 +170,12 @@ export const register: Register = on => {
     const result = await next(e)
 
     void $.command
-      .register({ name: 'she', description: 'Show the she explanation pane for Bash commands' })
+      .register({
+        name: 'she',
+        description: 'she explanations: open the pane, or turn them on/off for this session',
+        argumentHint: '[on|off]',
+        immediate: true,
+      })
       .catch(() => undefined)
 
     // Warm the model without holding session start; failures are only noted.
@@ -175,19 +188,40 @@ export const register: Register = on => {
     return result
   })
 
-  on('command.run', { command: 'she' }, async $ => {
-    const opened = await openPane($)
+  on('command.run', { command: 'she' }, async ($, e) => {
+    const word = e.args.trim().toLowerCase()
+    if (word === 'on' || word === 'off') {
+      await update($, isOn, () => word === 'on')
 
-    return { text: opened.isPlaced ? 'she pane opened.' : `she pane waits: ${opened.reason}` }
+      return { text: word === 'on' ? 'she: explanations on for this session.' : 'she: explanations off for this session (/she on to resume).' }
+    }
+    if (word !== '') return { text: `she: unknown argument "${e.args.trim()}"; use /she, /she on or /she off.` }
+    const opened = await openPane($)
+    const state = (await read($, isOn)) ? 'on' : 'off'
+
+    return { text: opened.isPlaced ? `she pane opened (explanations ${state}).` : `she pane waits: ${opened.reason}` }
   })
 
-  // The trigger: the engine's own verdict for a Bash call. An `ask` is what puts
-  // it to the permission prompt (or, in auto mode, to the classifier). The
-  // verdict is handed back untouched, and the explanation runs on its own.
+  // The trigger: the engine's own verdict for a Bash call. An `ask` starts the
+  // explanation, unless a host's permission callback answers it
+  // (`approver: 'host'`, e.g. VS Code), where the mod stays quiet.
+  //
+  // Deliberately not `classic.PermissionRequest`: another plugin that answers
+  // it without `next` (a security plugin, say) would hide it from this mod.
+  // The cost: in auto mode the classifier settles many asks silently, and
+  // those get explained too.
+  //
+  // The verdict is handed back untouched; nothing is held.
   on('tool.check', { tool: 'Bash' }, async ($, e, next) => {
     const verdict = await next(e)
     const command = commandOf(e.input)
-    if (verdict.decision === 'ask' && e.tool_use_id !== undefined && command !== undefined) {
+    if (
+      verdict.decision === 'ask' &&
+      e.approver !== 'host' &&
+      e.tool_use_id !== undefined &&
+      command !== undefined &&
+      (await read($, isOn))
+    ) {
       void explain($, e.tool_use_id, command)
     }
 
@@ -200,7 +234,19 @@ export const register: Register = on => {
     const chosen = await read($, selected)
     const current = await read($, tab)
     const warning = await read($, notice)
+    const isEnabled = await read($, isOn)
     const width = Math.max(20, e.props.bodyColumns)
+    const toggle = (
+      <Box key="switch">
+        <Text dimColor={isEnabled} color={isEnabled ? undefined : 'warning'}>
+          {isEnabled ? 'explanations on ' : 'explanations off (this session) '}
+        </Text>
+        <Button key="toggle" plain dimColor label={isEnabled ? 'turn off' : 'turn on'} onPress={() => update($, isOn, () => !isEnabled)} />
+      </Box>
+    )
+    const copyButton = (key: string, text: string, what: string) => (
+      <Button key={`copy-${key}`} plain dimColor label="⧉" onPress={press => void copy($, text, what, press.surface)} />
+    )
 
     const at = chosen === null ? list.length - 1 : list.findIndex(one => one.id === chosen)
     const shown = at >= 0 ? list[at] : list[list.length - 1]
@@ -211,6 +257,7 @@ export const register: Register = on => {
     if (shown === undefined) {
       return (
         <Box flexDirection="column">
+          {toggle}
           {warning !== null && <Text color="warning">{warning}</Text>}
           <Text dimColor>No Bash command has needed approval yet.</Text>
         </Box>
@@ -246,9 +293,13 @@ export const register: Register = on => {
             const style = effectStyle('file', f.op, f.basis)
 
             return (
-              <Text key={`file-${n}`} wrap="truncate-end" color={style.color} dimColor={style.dimColor} italic={style.italic}>
-                {f.op.padEnd(7)} {clean(f.path)} <Text dimColor>[{style.tag}]</Text>
-              </Text>
+              <Box key={`file-${n}`}>
+                {copyButton(`file-${n}`, f.path, f.path)}
+                <Text wrap="truncate-end" color={style.color} dimColor={style.dimColor} italic={style.italic}>
+                  {' '}
+                  {f.op.padEnd(7)} {clean(f.path)} <Text dimColor>[{style.tag}]</Text>
+                </Text>
+              </Box>
             )
           })}
         </Box>
@@ -263,11 +314,17 @@ export const register: Register = on => {
           {shown.env.map((v, n) => {
             const style = effectStyle('env', v.op, v.basis)
 
+            const text = v.value !== undefined ? `${v.name}=${v.value}` : v.name
+
             return (
-              <Text key={`env-${n}`} wrap="truncate-end" color={style.color} dimColor={style.dimColor} italic={style.italic}>
-                {v.op.padEnd(7)} {clean(v.name)}
-                {v.value !== undefined ? `=${clean(v.value)}` : ''} <Text dimColor>[{style.tag}]</Text>
-              </Text>
+              <Box key={`env-${n}`}>
+                {copyButton(`env-${n}`, text, v.name)}
+                <Text wrap="truncate-end" color={style.color} dimColor={style.dimColor} italic={style.italic}>
+                  {' '}
+                  {v.op.padEnd(7)} {clean(v.name)}
+                  {v.value !== undefined ? `=${clean(v.value)}` : ''} <Text dimColor>[{style.tag}]</Text>
+                </Text>
+              </Box>
             )
           })}
         </Box>
@@ -304,6 +361,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" width={width}>
+        {toggle}
         {warning !== null && <Text color="warning">{warning}</Text>}
         <Box>
           <Button key="older" plain label="‹ older" onPress={select(index - 1)} dimColor={index <= 0} />
@@ -313,9 +371,12 @@ export const register: Register = on => {
           </Text>
           <Button key="newer" plain label="newer ›" onPress={select(index + 1)} dimColor={index >= list.length - 1} />
         </Box>
-        <Text bold wrap="truncate-end">
-          $ {command}
-        </Text>
+        <Box>
+          {copyButton('command', sheTemplate(shown.command), 'as she -- …')}
+          <Text bold wrap="truncate-end">
+            {' '}$ {command}
+          </Text>
+        </Box>
         {shown.note !== undefined && <Text color="warning">{clean(shown.note)}</Text>}
 
         <Box marginTop={1} flexWrap="wrap">
@@ -367,7 +428,7 @@ export const register: Register = on => {
     const list = await read($, explanations)
     const newest = list[list.length - 1]
     const gone = await read($, dismissed)
-    if (e.props.hasSurvey || newest === undefined || newest.id === gone) return next(e)
+    if (e.props.hasSurvey || newest === undefined || newest.id === gone || !(await read($, isOn))) return next(e)
 
     const panes = await $.ui.panes().catch(() => [])
     if (panes.some(p => p.id === PANE && p.isPlaced && p.isShown)) return next(e)

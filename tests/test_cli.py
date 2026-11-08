@@ -189,3 +189,43 @@ class TestActions(CliTestCase):
         code, _, err = self.run_cli(["--status", "--", "ls"])
         self.assertEqual(code, 2)
         self.assertIn("--status does not take a command to explain", err)
+
+
+class TestStatus(CliTestCase):
+    def status(self, version: str | None, models: list[dict], which: str | None = "/usr/local/bin/ollama") -> str:
+        with mock.patch("she.llm.OllamaClient.server_version", return_value=version), mock.patch(
+            "she.llm.OllamaClient.installed_models", return_value=models
+        ), mock.patch("she.llm.OllamaClient.running_models", return_value=[]), mock.patch(
+            "she.cli.shutil.which", return_value=which
+        ):
+            code, out, _ = self.run_cli(["--status"])
+        self.assertEqual(code, 0)
+        return out
+
+    def test_no_ollama_installed(self) -> None:
+        out = self.status(None, [], which=None)
+        self.assertIn("ollama:        No Ollama installed", out)
+        self.assertNotIn("weights:", out)
+
+    def test_ollama_installed_but_down(self) -> None:
+        self.assertIn("not running at http://localhost:11434 (/usr/local/bin/ollama", self.status(None, []))
+
+    def test_model_required(self) -> None:
+        with mock.patch.dict(os.environ, {"SHE_MODEL": "gemma3:4b"}):
+            out = self.status("0.40.0", [{"name": "llama3.2:3b", "digest": "abc", "size": 10}])
+        self.assertIn("model:         gemma3:4b ($SHE_MODEL)", out)
+        self.assertIn("installed:     Model required: 'gemma3:4b' is not installed in Ollama (installed: llama3.2:3b)", out)
+        self.assertIn("available:     llama3.2:3b", out)
+
+    def test_weights_location_and_removal(self) -> None:
+        models = Path(self.directory.name) / "models"
+        manifest = models / "manifests" / "registry.ollama.ai" / "library" / "gemma3" / "4b"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("{}")
+        with mock.patch.dict(os.environ, {"OLLAMA_MODELS": str(models), "SHE_MODEL": "gemma3:4b"}):
+            out = self.status("0.40.0", [{"name": "gemma3:4b", "digest": "0123456789abcdef", "size": 3 * 1024**3}], which="x")
+        out = out.replace(str(models), "<M>")
+        self.assertIn("installed:     yes, 3.0 GB, digest 0123456789ab", out)
+        self.assertIn("weights:       <M>/manifests/registry.ollama.ai/library/gemma3/4b\n", out)
+        self.assertIn("layers in <M>/blobs; remove with `ollama rm gemma3:4b`", out)
+        self.assertIn("models dir:    <M> ($OLLAMA_MODELS)", out)

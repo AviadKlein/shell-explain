@@ -86,7 +86,7 @@ uv   installed: 0.9.4 (/opt/homebrew/bin/uv)
 | Flag | Meaning |
 |---|---|
 | `--warm` | Idempotently ensure Ollama is running and the model is loaded; return immediately after. Intended for the SessionStart hook |
-| `--status` | Print Ollama reachability, selected model, model digest, cache locations and sizes |
+| `--status` | Print Ollama reachability (or `No Ollama installed`), the selected model and where its name came from, whether it is installed (or `Model required: …`, listing installed models), its size, digest and weights location (`$OLLAMA_MODELS` or `~/.ollama/models`) with the `ollama rm` line that removes it, cache locations and sizes |
 | `--clear-cache` | Delete the answer cache (§7). The help-page cache is managed with `--forget` |
 | `--install-watchdog` / `--uninstall-watchdog` | Add or remove the launchd agent that stops an idle Ollama server (§6) |
 
@@ -319,8 +319,11 @@ the version probe.
   `~/Library/Application Support/she/`, and checked with `ps` to still be an ollama process), so
   an Ollama you run yourself for other work is left alone. Installed with
   `she --install-watchdog`, removed with `she --uninstall-watchdog`.
-- Model missing → exit 4 with a message telling the user to run `ollama pull <model>`.
-  `she` never pulls models on its own.
+- Ollama not installed (no server answers and `ollama` is not on PATH) → exit 4,
+  `No Ollama installed: …` with the install URL.
+- Model missing → exit 4, `Model required: '<model>' is not installed in Ollama (installed: …)`,
+  telling the user to `ollama pull <model>` or set `SHE_MODEL` to an installed model.
+  `she` never pulls or ships models; the user picks any model Ollama supports.
 - Requests set `think: false`. Qwen3.5 and similar models have a reasoning mode that
   produces hundreds of hidden tokens before answering, which would blow the latency targets.
 

@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Self, Tuple
 
 from she.models import ENV_OPS, FILE_OPS, EnvEffect, FileEffect, LlmAnswer
@@ -33,8 +34,48 @@ class LlmError(RuntimeError):
     """The LLM layer failed (server down, timeout, bad reply). Maps to exit code 4."""
 
 
+class OllamaMissingError(LlmError):
+    """No Ollama server answers and the `ollama` command is not installed."""
+
+
 class ModelMissingError(LlmError):
-    """The configured model is not pulled."""
+    """The configured model is not pulled. `she` never pulls one itself."""
+
+
+def model_required_message(model: str, installed: List[str], is_default: bool = False) -> str:
+    """The `Model required` error text: the two ways out, and what is installed.
+
+    `is_default` says no model was chosen (no `--model`, no `SHE_MODEL`), so the
+    built-in default was tried.
+    """
+    have = f"installed: {', '.join(installed)}" if installed else "no models installed"
+    chosen = " (the default; no SHE_MODEL set)" if is_default else ""
+    return (
+        f"Model required: {model!r}{chosen} is not installed in Ollama ({have}). "
+        f"Pull it with `ollama pull {model}`, or set SHE_MODEL to an installed model."
+    )
+
+
+def models_dir(environ: Optional[Mapping[str, str]] = None) -> Path:
+    """Where Ollama keeps model files: `$OLLAMA_MODELS`, else `~/.ollama/models` (Ollama's own default)."""
+    env = os.environ if environ is None else environ
+    configured = env.get("OLLAMA_MODELS")
+    return Path(configured).expanduser() if configured else Path.home() / ".ollama" / "models"
+
+
+def manifest_path(root: Path, model: str) -> Path:
+    """The manifest file Ollama writes for `model` under `root`.
+
+    `qwen3.5:4b` → `manifests/registry.ollama.ai/library/qwen3.5/4b`; `user/m` →
+    `.../registry.ollama.ai/user/m/latest`; `hf.co/org/repo:q4` → `manifests/hf.co/org/repo/q4`.
+    """
+    name, _, tag = model.rpartition(":") if ":" in model.rsplit("/", 1)[-1] else (model, "", "latest")
+    parts = name.split("/")
+    if len(parts) == 1:
+        parts = ["registry.ollama.ai", "library", *parts]
+    elif "." not in parts[0] and ":" not in parts[0]:
+        parts = ["registry.ollama.ai", *parts]
+    return root.joinpath("manifests", *parts, tag)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,12 +87,14 @@ class OllamaConfig:
         model: Model tag (`--model` > `SHE_MODEL` > default).
         keep_alive: How long Ollama keeps the model loaded (`SHE_KEEP_ALIVE`).
         num_predict: Output token cap.
+        is_default_model: True when neither `--model` nor `SHE_MODEL` chose the model.
     """
 
     base_url: str = DEFAULT_URL
     model: str = DEFAULT_MODEL
     keep_alive: str = DEFAULT_KEEP_ALIVE
     num_predict: int = DEFAULT_NUM_PREDICT
+    is_default_model: bool = False
 
     @classmethod
     def from_env(cls, model: Optional[str] = None, environ: Optional[Mapping[str, str]] = None) -> Self:
@@ -60,6 +103,7 @@ class OllamaConfig:
             base_url=(env.get("SHE_OLLAMA_URL") or DEFAULT_URL).rstrip("/"),
             model=model or env.get("SHE_MODEL") or DEFAULT_MODEL,
             keep_alive=env.get("SHE_KEEP_ALIVE") or DEFAULT_KEEP_ALIVE,
+            is_default_model=not (model or env.get("SHE_MODEL")),
         )
 
     def copy(self, **changes: object) -> Self:
@@ -132,7 +176,10 @@ class OllamaClient:
             return False
         executable = shutil.which("ollama")
         if executable is None:
-            raise LlmError("Ollama is not running and the `ollama` command is not on PATH; install it from https://ollama.com")
+            raise OllamaMissingError(
+                f"No Ollama installed: nothing answers at {self.__config.base_url} and `ollama` is not on PATH. "
+                "Install Ollama, then pull a model."
+            )
         process = subprocess.Popen(
             [executable, "serve"],
             stdin=subprocess.DEVNULL,
@@ -152,19 +199,33 @@ class OllamaClient:
             time.sleep(POLL_INTERVAL_SECONDS)
         raise LlmError(f"Ollama did not come up within {SERVER_START_SECONDS:.0f} s at {self.__config.base_url}")
 
+    def installed_models(self, deadline: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Every model Ollama has, as `/api/tags` lists them (name, digest, size, ...)."""
+        return list(self._json("GET", "/api/tags", None, _remaining(deadline, 5.0)).get("models", []))
+
+    def installed_model(self, deadline: Optional[float] = None) -> Dict[str, Any]:
+        """The configured model's `/api/tags` entry.
+
+        Raises:
+            ModelMissingError: If the model isn't pulled.
+        """
+        models = self.installed_models(deadline)
+        wanted = self.__config.model
+        names = {wanted, wanted if ":" in wanted else f"{wanted}:latest"}
+        for model in models:
+            if model.get("name") in names or model.get("model") in names:
+                return model
+        raise ModelMissingError(
+            model_required_message(wanted, [str(model.get("name", "")) for model in models], self.__config.is_default_model)
+        )
+
     def model_digest(self, deadline: Optional[float] = None) -> str:
         """The installed model's digest from `/api/tags`.
 
         Raises:
             ModelMissingError: If the model isn't pulled.
         """
-        tags = self._json("GET", "/api/tags", None, _remaining(deadline, 5.0))
-        wanted = self.__config.model
-        names = {wanted, wanted if ":" in wanted else f"{wanted}:latest"}
-        for model in tags.get("models", []):
-            if model.get("name") in names or model.get("model") in names:
-                return str(model.get("digest", ""))
-        raise ModelMissingError(f"model {wanted!r} is not installed; run: ollama pull {wanted}")
+        return str(self.installed_model(deadline).get("digest", ""))
 
     def running_models(self) -> List[Dict[str, Any]]:
         return list(self._json("GET", "/api/ps", None, 2.0).get("models", []))

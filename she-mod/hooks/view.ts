@@ -146,3 +146,16 @@ export const REDRAW_MS = 100
 export function throttleWait(lastAt: number, now: number, interval = REDRAW_MS): number {
   return Math.max(0, lastAt + interval - now)
 }
+
+/** `text` as one single-quoted shell word: `'` becomes `'\\''`. */
+export function shellQuote(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * What the command's copy button puts on the clipboard: `she -- '<command>'`,
+ * so a paste into a shell explains the command instead of running it.
+ */
+export function sheTemplate(command: string): string {
+  return `she -- ${shellQuote(command)}`
+}
